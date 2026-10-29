@@ -1,0 +1,145 @@
+```groovy
+pipeline {
+    agent any
+
+    options {
+        // Timestamp logs, prevent overlapping builds, and limit build history.
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        // Tell Terraform it is running in an automated pipeline.
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT = 'false'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Check out the Git repository configured in the Jenkins job.
+                checkout scm
+            }
+        }
+
+        stage('Check Required Tools') {
+            steps {
+                sh '''
+                    set -eu
+
+                    # Fail early if the Jenkins agent lacks required tools.
+                    command -v git
+                    command -v terraform
+                    command -v aws
+
+                    terraform version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Terraform Formatting') {
+            steps {
+                dir('aws/terraform') {
+                    sh '''
+                        set -eu
+
+                        # Verify formatting without modifying tracked files.
+                        terraform fmt -check -recursive
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Initialization and Validation') {
+            steps {
+                dir('aws/terraform') {
+                    sh '''
+                        set -eu
+
+                        # Initialize providers without connecting to a remote
+                        # backend or creating cloud resources.
+                        terraform init -backend=false -input=false
+
+                        # Validate Terraform syntax and configuration.
+                        terraform validate
+                    '''
+                }
+            }
+        }
+
+        stage('Cloud Security Scan') {
+            steps {
+                dir('aws/terraform') {
+                    sh '''
+                        set -eu
+
+                        # Checkov scans Terraform for common cloud security
+                        # misconfigurations. Install it on the Jenkins agent.
+                        if ! command -v checkov >/dev/null 2>&1; then
+                            echo "ERROR: Checkov is required but not installed."
+                            exit 1
+                        fi
+
+                        checkov --directory . --framework terraform
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            when {
+                // Run the plan only when a real, untracked local tfvars file
+                // is present. Never use the placeholder example automatically.
+                expression {
+                    fileExists('aws/terraform/terraform.tfvars')
+                }
+            }
+
+            steps {
+                dir('aws/terraform') {
+                    sh '''
+                        set -eu
+
+                        # AWS credentials must be configured securely on the
+                        # Jenkins agent before this stage can query AWS.
+                        aws sts get-caller-identity
+
+                        # Generate a plan for review; do not apply it here.
+                        terraform init -input=false
+
+                        terraform plan \
+                            -input=false \
+                            -var-file=terraform.tfvars \
+                            -out=tfplan
+
+                        # Show a readable summary without exposing variable
+                        # values in the Jenkins console.
+                        terraform show -no-color tfplan
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'SUCCESS: Secure cloud network CI checks passed.'
+        }
+
+        failure {
+            echo 'FAILED: Review Terraform validation and security scan results.'
+        }
+
+        cleanup {
+            // Remove local plans and state files; never archive them.
+            dir('aws/terraform') {
+                sh '''
+                    rm -f tfplan terraform.tfstate terraform.tfstate.backup
+                '''
+            }
+        }
+    }
+}
+```

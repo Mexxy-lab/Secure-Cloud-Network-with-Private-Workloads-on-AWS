@@ -1,0 +1,19 @@
+# Terraform working directory, state, plans, and local variables.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.tfvars
+!terraform.tfvars.example
+crash.log
+
+# Private keys, credentials, and environment files.
+*.pem
+*.key
+.vault-pass
+.env
+
+# Generated local SSH configuration and temporary artifacts.
+ssh_config.local
+*.tmp
